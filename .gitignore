@@ -1,0 +1,13 @@
+# MATLAB
+*.asv
+*.m~
+*.mex*
+slprj/
+*.slxc
+
+# Generated data / cache
+*.mat.bak
+
+# OS
+.DS_Store
+Thumbs.db
