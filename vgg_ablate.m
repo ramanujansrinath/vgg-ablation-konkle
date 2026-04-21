@@ -1,88 +1,95 @@
 clear; clc; close all;
 
-% --- Image loading and pixel-feature extraction ---
-% Load natural/texform image pairs from the .mat file, resize both sets to a
-% common spatial resolution, force 3-channel format, and compute a struct of
-% pixel-level features for every image.
-disp('getting images')
-load('texform_img.mat','texform_img');
-imsize = 256;
-tt_img = nan(imsize,imsize,3,length(texform_img));
-ttex_img = nan(imsize,imsize,3,length(texform_img));
-for tt=1:length(texform_img)
-    img = imresize(texform_img(tt).img,[imsize imsize]);
-    tt_img(:,:,:,tt) = double(repmat(img,1,1,3));
-    tt_params_st(tt) = getPixelFeatures(tt_img(:,:,:,tt),tt); %#ok<SAGROW>
-
-    img = imresize(texform_img(tt).tex_img,[imsize imsize]);
-    ttex_img(:,:,:,tt) = double(repmat(img,1,1,3));
-    ttex_params_st(tt) = getPixelFeatures(ttex_img(:,:,:,tt),tt); %#ok<SAGROW>
+if exist('cached_analysis.mat','file')
+    load('cached_analysis.mat')
+    disp('loaded cached analysis')
+else
+    % --- Image loading and pixel-feature extraction ---
+    % Load natural/texform image pairs from the .mat file, resize both sets to a
+    % common spatial resolution, force 3-channel format, and compute a struct of
+    % pixel-level features for every image.
+    disp('getting images')
+    load('texform_img.mat','texform_img');
+    imsize = 256;
+    tt_img = nan(imsize,imsize,3,length(texform_img));
+    ttex_img = nan(imsize,imsize,3,length(texform_img));
+    parfor tt=1:length(texform_img)
+        img = imresize(texform_img(tt).img,[imsize imsize]);
+        tt_img(:,:,:,tt) = double(repmat(img,1,1,3));
+        tt_params_st(tt) = getPixelFeatures(tt_img(:,:,:,tt),tt);
+    
+        img = imresize(texform_img(tt).tex_img,[imsize imsize]);
+        ttex_img(:,:,:,tt) = double(repmat(img,1,1,3));
+        ttex_params_st(tt) = getPixelFeatures(ttex_img(:,:,:,tt),tt);
+    end
+    
+    % --- Feature matrix assembly ---
+    % Drop uninformative or redundant struct fields, flatten each struct array
+    % into a numeric matrix, and prepend the high-level semantic labels
+    % (size/animacy) stored in the image metadata as the first two feature columns.
+    tt_params_st = rmfield(tt_params_st,{'exempName' 'color_hist_red' 'color_hist_green' 'aspect_ratio' 'boundingBox_size'});
+    tt_params_mat = reshape(struct2array(tt_params_st),numel(fields(tt_params_st)),[])';
+    tt_params = [[texform_img.big]' [texform_img.animal]' tt_params_mat];
+    
+    ttex_params_st = rmfield(ttex_params_st,{'exempName' 'color_hist_red' 'color_hist_green' 'aspect_ratio' 'boundingBox_size'});
+    ttex_params_mat = reshape(struct2array(ttex_params_st),numel(fields(tt_params_st)),[])';
+    ttex_params = [[texform_img.big]' [texform_img.animal]' ttex_params_mat];
+    
+    % --- NaN handling and joint min-max normalization ---
+    % Zero-fill missing feature values, then scale every feature column to [0,1]
+    % using the min/max computed jointly across both image sets so natural and
+    % texform images share the same numeric reference frame.
+    idx = isnan(ttex_params) | isnan(tt_params);
+    tt_params(idx) = 0;
+    ttex_params(idx) = 0;
+    
+    pmin = repmat(min([tt_params; ttex_params]),size(tt_params,1),1);
+    pmax = repmat(max([tt_params; ttex_params]),size(tt_params,1),1);
+    tt_params = (tt_params-pmin)./(pmax-pmin);
+    ttex_params = (ttex_params-pmin)./(pmax-pmin);
+    
+    save('cached_analysis.mat','tt_img','tt_params','ttex_img','ttex_params','-append')
 end
 
-% --- Feature matrix assembly ---
-% Drop uninformative or redundant struct fields, flatten each struct array
-% into a numeric matrix, and prepend the high-level semantic labels
-% (big/animal) stored in the image metadata as the first two feature columns.
-tt_params_st = rmfield(tt_params_st,{'exempName' 'color_hist_red' 'color_hist_green' 'aspect_ratio' 'boundingBox_size'});
-tt_params_mat = reshape(struct2array(tt_params_st),numel(fields(tt_params_st)),[])';
-tt_params = [[texform_img.big]' [texform_img.animal]' tt_params_mat];
-
-ttex_params_st = rmfield(ttex_params_st,{'exempName' 'color_hist_red' 'color_hist_green' 'aspect_ratio' 'boundingBox_size'});
-ttex_params_mat = reshape(struct2array(ttex_params_st),numel(fields(tt_params_st)),[])';
-ttex_params = [[texform_img.big]' [texform_img.animal]' ttex_params_mat];
-
-% --- NaN handling and joint min-max normalization ---
-% Zero-fill missing feature values, then scale every feature column to [0,1]
-% using the min/max computed jointly across both image sets so natural and
-% texform images share the same numeric reference frame.
-idx = isnan(ttex_params) |isnan(tt_params);
-tt_params(idx) = 0;
-ttex_params(idx) = 0;
-
-pmin = repmat(min([tt_params; ttex_params]),120,1);
-pmax = repmat(max([tt_params; ttex_params]),120,1);
-tt_params = (tt_params-pmin)./(pmax-pmin);
-ttex_params = (ttex_params-pmin)./(pmax-pmin);
-
-% Discard intermediate variables; retain only the four arrays needed downstream.
-clearvars -except tt_img tt_params ttex_img ttex_params
-
 %%
-% --- Network initialization ---
-% Load the pretrained VGG16 network and specify which max-pooling layers
-% (by index, e.g. pool1/pool3/pool5) will be used as activation sources.
-disp('loading network')
-net = vgg16;
-layers = [1 3 5];
-
-%%
-% --- Ablation analysis: natural images ---
-% For each target layer, extract central-unit activations, reduce dimensionality,
-% and run the random-ablation decoding sweep; intermediate results are saved
-% immediately so the expensive computation is not lost if the script is interrupted.
-disp('analyzing natural images')
-tt_randabl = cell(1,length(layers));
-tt_signeg = cell(1,length(layers));
-for ll=1:length(layers)
-    disp(['analyzing layer' num2str(layers(ll))])
-    [tt_randabl{ll},tt_signeg{ll}] = getabl(net,layers(ll),tt_img,tt_params);
+if input('Redo ablation analysis? (1/0): ')
+    %%
+    % --- Network initialization ---
+    % Load the pretrained VGG16 network and specify which max-pooling layers
+    % (by index, e.g. pool1/pool3/pool5) will be used as activation sources.
+    disp('loading network')
+    net = vgg16;
+    layers = [1 3 5];
+    
+    %%
+    % --- Ablation analysis: natural images ---
+    % For each target layer, extract central-unit activations, reduce dimensionality,
+    % and run the random-ablation decoding sweep; intermediate results are saved
+    % immediately so the expensive computation is not lost if the script is interrupted.
+    disp('analyzing natural images')
+    tt_randabl = cell(1,length(layers));
+    tt_signeg = cell(1,length(layers));
+    for ll=1:length(layers)
+        disp(['analyzing layer' num2str(layers(ll))])
+        [tt_randabl{ll},tt_signeg{ll}] = getabl(net,layers(ll),tt_img,tt_params);
+    end
+    
+    save('cached_analysis.mat','tt_randabl','tt_signeg','-append')
+    
+    %%
+    % --- Ablation analysis: texform images ---
+    % Repeat the identical pipeline for texform images and append results to the
+    % existing cache file so both image types end up in the same .mat.
+    disp('analyzing texform images')
+    ttex_randabl = cell(1,length(layers));
+    ttex_signeg = cell(1,length(layers));
+    for ll=1:length(layers)
+        disp(['analyzing layer' num2str(layers(ll))])
+        [ttex_randabl{ll},ttex_signeg{ll}] = getabl(net,layers(ll),ttex_img,ttex_params);
+    end
+    
+    save('cached_analysis.mat','ttex_randabl','ttex_signeg','-append')
 end
-
-save('cached_analysis.mat','tt_randabl','tt_signeg')
-
-%%
-% --- Ablation analysis: texform images ---
-% Repeat the identical pipeline for texform images and append results to the
-% existing cache file so both image types end up in the same .mat.
-disp('analyzing texform images')
-ttex_randabl = cell(1,length(layers));
-ttex_signeg = cell(1,length(layers));
-for ll=1:length(layers)
-    disp(['analyzing layer' num2str(layers(ll))])
-    [ttex_randabl{ll},ttex_signeg{ll}] = getabl(net,layers(ll),ttex_img,ttex_params);
-end
-
-save('cached_analysis.mat','ttex_randabl','ttex_signeg','-append')
 
 %%
 % --- Plotting: natural images ---
@@ -90,6 +97,7 @@ save('cached_analysis.mat','ttex_randabl','ttex_signeg','-append')
 % accuracy shows a significant negative slope as more dimensions are ablated
 % go in the top row (informative dimensions), all others in the bottom row.
 figure('color','w','position',[86,477,1126,801],'Name','Natural')
+layers = [1 3 5];
 ha = tight_subplot(2,length(layers),0.05,0.05,0.05);
 ha = reshape(ha,length(layers),2)';
 col = {'b' 'r' 'k'};

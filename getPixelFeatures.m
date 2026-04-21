@@ -7,7 +7,11 @@ function features = getPixelFeatures(img,imgName)
     features.exempName = imgName;
 
     % Convert to grayscale for features that operate on luminance only.
-    gray_img = rgb2gray(img);
+    if size(img,3) == 3
+        gray_img = rgb2gray(img);
+    else
+        gray_img = img;
+    end
 
     % 1. Contrast — global luminance variability of the image.
     features.contrast = std2(gray_img);
@@ -38,13 +42,15 @@ function features = getPixelFeatures(img,imgName)
     % 7. Relative color channel means — each channel mean divided by the overall
     %    luminance mean, giving a hue-like summary independent of brightness.
     if size(img, 3) == 3
-        imgTmp = img;
+        features.color_hist_red = mean(img(:,:,1),'all')./mean(gray_img,'all'); % histcounts(img(:,:,1), 256);
+        features.color_hist_green = mean(img(:,:,2),'all')./mean(gray_img,'all');
+        features.color_hist_blue = mean(img(:,:,3),'all')./mean(gray_img,'all');
     else
-        imgTmp = repmat(gray_img,1,1,3);
+        features.color_hist_red = mean(gray_img,'all');
+        features.color_hist_green = mean(gray_img,'all');
+        features.color_hist_blue = mean(gray_img,'all');
     end
-    features.color_hist_red = mean(imgTmp(:,:,1),'all')./mean(gray_img,'all'); % histcounts(img(:,:,1), 256);
-    features.color_hist_green = mean(imgTmp(:,:,2),'all')./mean(gray_img,'all');
-    features.color_hist_blue = mean(imgTmp(:,:,3),'all')./mean(gray_img,'all');
+    
 
     % 8. GLCM texture statistics — contrast, correlation, energy, and homogeneity
     %    derived from the gray-level co-occurrence matrix.
@@ -73,10 +79,12 @@ function features = getPixelFeatures(img,imgName)
     if ~isempty(stats)
         boundingBox = stats(1).BoundingBox;
         features.aspect_ratio = boundingBox(3) / boundingBox(4);
-    else
-        features.aspect_ratio = NaN;  % No object found
+        features.boundingBox_size = boundingBox(3)*boundingBox(4)/numel(gray_img);
+    else % No object found
+        features.aspect_ratio = NaN;
+        features.boundingBox_size = NaN;
     end
-    features.boundingBox_size = boundingBox(3)*boundingBox(4)/numel(gray_img);
+    
 
     % 12. Harris corner count — number of interest points detected by the
     %     Harris corner detector, reflecting local geometric complexity.

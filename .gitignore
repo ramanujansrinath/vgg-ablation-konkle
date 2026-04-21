@@ -8,6 +8,9 @@ slprj/
 # Generated data / cache
 *.mat.bak
 
+# Local notes
+todo.md
+
 # OS
 .DS_Store
 Thumbs.db
